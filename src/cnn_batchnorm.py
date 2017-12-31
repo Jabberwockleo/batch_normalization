@@ -43,6 +43,13 @@ DEBUG_LOG = False
 accumulative_var_name_list = []
 accumulative_var_list = []
 
+# dataset parameters
+DATA_DIR = "../data/mnist"
+IMG_WIDTH = 28
+IMG_HEIGHT = 28
+PIXEL_NUM = 28 * 28
+CLASS_NUM = 10
+
 # mock config
 param_x = -5
 param_y = 5
@@ -66,13 +73,13 @@ def build_graph(mode="train"):
     Args:
         mode: train/predict
     Returns:
-        X, Y, y, ema, train_op, cost
+        X, Y, y, ema, train_op, cost, accuracy
     """
     with tf.name_scope("input"):
-        X = tf.placeholder(tf.float32, [None, FEATURE_DIM])
-        Y = tf.placeholder(tf.float32, [None, OUT_DIM])
+        X = tf.placeholder(tf.float32, [None, PIXEL_NUM]) # flat image 0/1 pixel
+        Y = tf.placeholder(tf.float32, [None, CLASS_NUM]) # one hot
 
-    with tf.name_scope("mlp"):
+    with tf.name_scope("cnn"):
         # remember mean/var in each iteration and compute
         # aggregates through time
         ema = tf.train.ExponentialMovingAverage(decay=0.99)
@@ -120,45 +127,53 @@ def build_graph(mode="train"):
             layer = layer * scale + shift
             return layer
 
+        # default format "NHWC", the data is stored in the order of: [batch, height, width, channels].
+        layer = tf.reshape(X, shape=[-1, IMG_WIDTH, IMG_HEIGHT, 1])
+        # first convolution, output shape is [-1, 28, 28, 32]
+        layer = tf.nn.conv2d(input=layer,
+                # 5x5 filter of 1 channel in 32 channels out
+                filter=tf.Variable(tf.random_normal([5, 5, 1, 32])),
+                strides=[1, 1, 1, 1],
+                padding="SAME")
+        layer = tf.nn.bias_add(layer, tf.Variable(tf.random_normal([32])))
+        # maxpooling with 2x2, strides 2x2, output [-1, 14, 14, 32]
+        layer = tf.nn.max_pool(layer,
+                ksize=[1, 2, 2, 1],
+                strides=[1, 2, 2, 1],
+                padding="SAME")
+        # second convolution, output shape is [-1, 14, 14, 64]
+        layer = tf.nn.conv2d(input=layer,
+                filter=tf.Variable(tf.random_normal([5, 5, 32, 64])),
+                strides=[1, 1, 1, 1],
+                padding="SAME")
+        layer = tf.nn.bias_add(layer, tf.Variable(tf.random_normal([64])))
+        # maxpooling with 2x2, strides 2x2, output [-1, 7, 7, 64]
+        layer = tf.nn.max_pool(layer,
+                ksize=[1, 2, 2, 1],
+                strides=[1, 2, 2, 1],
+                padding="SAME")
 
-        def add_hidden_layer(layer):
-            """Add a hidden layer
-
-            Args:
-                layer: building graph
-            Returns:
-                built graph
-            """
-            W = tf.Variable(tf.random_normal([HIDDEN_UNIT_NUM, HIDDEN_UNIT_NUM]), name="W")
-            b = tf.Variable(tf.random_normal([1, HIDDEN_UNIT_NUM]), name="b")
-            layer = tf.matmul(layer, W) + b
-            layer = add_batch_norm(layer)
-            layer = tf.nn.relu(layer)
-            return layer
-
-        # first hidden layer
-        if True: # variable scope
-            W = tf.Variable(tf.random_normal([FEATURE_DIM, HIDDEN_UNIT_NUM]), name="W_first")
-            b = tf.Variable(tf.random_normal([1, HIDDEN_UNIT_NUM]), name="b_first")
-            layer = tf.matmul(X, W) + b
-            layer = add_batch_norm(layer)
-            layer = tf.nn.relu(layer)
-
-        for _ in xrange(1, HIDDEN_LAYERS_NUM):
-            layer = add_hidden_layer(layer)
-
-        # output layer
-        if True: # variable scope
-            W = tf.Variable(tf.random_normal([HIDDEN_UNIT_NUM, OUT_DIM]), name="W_last")
-            b = tf.Variable(tf.random_normal([1, OUT_DIM]), name="b_last")
-            y = tf.matmul(layer, W) + b
-
-        # MSE
-        cost = tf.reduce_mean(tf.square(Y - y))
+        # flatten channels
+        layer = tf.reshape(layer, [-1, 7 * 7 * 64])
+        # transform image to 1024 features
+        layer = tf.add(tf.matmul(layer,
+            tf.Variable(tf.random_normal([7 * 7 * 64, 1024]))),
+            tf.Variable([tf.random_normal([1024])]))
+        # apply dropout for regularization
+        layer = tf.nn.dropout(layer, D)
+        # finally each image outputs
+        layer = tf.add(tf.matmul(layer,
+            tf.Variable(tf.random_normal([1024, CLASS_NUM]))),
+            tf.Variable(tf.random_normal([CLASS_NUM])))
 
     with tf.name_scope("op"):
-        train_op = tf.train.GradientDescentOptimizer(LEARNING_RATE).minimize(cost)
-    return X, Y, y, ema, train_op, cost
+        cost = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(
+                    logits=layer, labels=Y))
+        train_op = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE).minimize(cost)
+        correct_flag_tensor = tf.equal(tf.argmax(layer, 1), tf.argmax(Y, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_flag_tensor, tf.float32))
+    return X, Y, y, ema, train_op, cost, accuracy
 
 if __name__ == "__main__":
     GRAPH_MODE = sys.argv[1]
