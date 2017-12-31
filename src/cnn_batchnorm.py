@@ -13,15 +13,13 @@ Date: 2017/11/27 10:41:01
 """
 import sys
 import tensorflow as tf
-import numpy as np
-import matplotlib.pyplot as plt
 import tensorflow.examples.tutorials.mnist as mnist
-import mock_util
 
 # environment config
 GRAPH_MODE = "train" # train/predict
 MODEL_PATH = "model.cnn_batchnorm.ckpt"
 LOGS_PATH = "logs/cnn_batchnorm/"
+USE_BATCH_NORM = True
 
 # specific hyper parameters
 
@@ -33,11 +31,11 @@ OUT_DIM = 1
 
 # general hyper parameters
 LEARNING_RATE = 0.01
-TRAINING_EPOCH_NUM = 1000
+TRAINING_EPOCH_NUM = 100
 BATCH_SIZE = 10
 
 # debug flags
-DEBUG_LOG = False
+DEBUG_LOG = True
 
 # auxiliary storage
 accumulative_var_name_list = []
@@ -73,8 +71,12 @@ def build_graph(mode="train"):
     Args:
         mode: train/predict
     Returns:
-        X, Y, y, ema, train_op, cost, accuracy
+        X, Y, y, ema, train_op, cost, accuracy, t, tt
     """
+    with tf.name_scope("debug"):
+        t = tf.constant(0)
+        tt = tf.constant(0)
+
     with tf.name_scope("input"):
         X = tf.placeholder(tf.float32, [None, PIXEL_NUM]) # flat image 0/1 pixel
         Y = tf.placeholder(tf.float32, [None, CLASS_NUM]) # one hot
@@ -84,7 +86,7 @@ def build_graph(mode="train"):
         # aggregates through time
         ema = tf.train.ExponentialMovingAverage(decay=0.99)
 
-        def add_batch_norm(layer):
+        def add_batch_norm(layer, width, height, depth):
             """Add batch normalization
 
             Args:
@@ -92,10 +94,10 @@ def build_graph(mode="train"):
             Returns:
                 built graph
             """
-            scale = tf.Variable(tf.ones([HIDDEN_UNIT_NUM]), name="scale")
-            shift = tf.Variable(tf.zeros([HIDDEN_UNIT_NUM]), name="shift")
-            mean = tf.Variable(tf.zeros([HIDDEN_UNIT_NUM]), name="mean")
-            var = tf.Variable(tf.zeros([HIDDEN_UNIT_NUM]), name="variance")
+            scale = tf.Variable(tf.ones([width, height, depth]), name="scale")
+            shift = tf.Variable(tf.zeros([width, height, depth]), name="shift")
+            mean = tf.Variable(tf.zeros([depth]), name="mean")
+            var = tf.Variable(tf.zeros([depth]), name="variance")
             accumulative_var_list.append(mean)
             accumulative_var_list.append(var)
 
@@ -113,7 +115,9 @@ def build_graph(mode="train"):
                     return tf.identity(mean), tf.identity(var)
 
             if mode == "train":
-                mean_, var_ = tf.nn.moments(layer, axes=[0])
+                # for convolutional layers mean and var are shared by each
+                # feature map (number equals to depth)
+                mean_, var_ = tf.nn.moments(layer, axes=[0, 1, 2])
                 # assign value instead of replacing variable referance
                 # must force op dependencies
                 with tf.control_dependencies([tf.assign(mean, mean_), tf.assign(var, var_)]):
@@ -141,6 +145,9 @@ def build_graph(mode="train"):
                 ksize=[1, 2, 2, 1],
                 strides=[1, 2, 2, 1],
                 padding="SAME")
+        # apply batch norm
+        if USE_BATCH_NORM == True:
+            layer = add_batch_norm(layer, 14, 14, 32)
         # second convolution, output shape is [-1, 14, 14, 64]
         layer = tf.nn.conv2d(input=layer,
                 filter=tf.Variable(tf.random_normal([5, 5, 32, 64])),
@@ -153,14 +160,15 @@ def build_graph(mode="train"):
                 strides=[1, 2, 2, 1],
                 padding="SAME")
 
+        # apply batch norm
+        if USE_BATCH_NORM == True:
+            layer = add_batch_norm(layer, 7, 7, 64)
         # flatten channels
         layer = tf.reshape(layer, [-1, 7 * 7 * 64])
         # transform image to 1024 features
         layer = tf.add(tf.matmul(layer,
             tf.Variable(tf.random_normal([7 * 7 * 64, 1024]))),
             tf.Variable([tf.random_normal([1024])]))
-        # apply dropout for regularization
-        layer = tf.nn.dropout(layer, D)
         # finally each image outputs
         layer = tf.add(tf.matmul(layer,
             tf.Variable(tf.random_normal([1024, CLASS_NUM]))),
@@ -173,7 +181,7 @@ def build_graph(mode="train"):
         train_op = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE).minimize(cost)
         correct_flag_tensor = tf.equal(tf.argmax(layer, 1), tf.argmax(Y, 1))
         accuracy = tf.reduce_mean(tf.cast(correct_flag_tensor, tf.float32))
-    return X, Y, y, ema, train_op, cost, accuracy
+    return X, Y, layer, ema, train_op, cost, accuracy, t, tt
 
 if __name__ == "__main__":
     GRAPH_MODE = sys.argv[1]
@@ -181,7 +189,9 @@ if __name__ == "__main__":
     clear_accumulative_ref()
     if GRAPH_MODE == "train":
         with tf.Session() as sess:
-            X, Y, y, ema, train_op, cost, accuracy = build_graph(GRAPH_MODE)
+            X, Y, y, ema, train_op, cost, accuracy, \
+                    t, tt \
+                    = build_graph(GRAPH_MODE)
             sess.run(tf.global_variables_initializer())
             summary_writer = tf.summary.FileWriter(LOGS_PATH, graph=tf.get_default_graph())
             for epoch in xrange(TRAINING_EPOCH_NUM):
@@ -189,16 +199,21 @@ if __name__ == "__main__":
                 x_data, y_data = mnist_data.train.next_batch(BATCH_SIZE)
                 sess.run([train_op],
                          feed_dict={X:x_data, Y:y_data})
-                if epoch % 100 == 0:
-                    cost_v, accuracy_v = sess.run([cost, accuracy],
+                if epoch % 10 == 0:
+                    cost_v, accuracy_v, t_v, tt_v = sess.run([cost, accuracy, t, tt],
                          feed_dict={X:x_data, Y:y_data})
-                    print "== epoch [%d], cost [%f], accuracy [%f]" % (epoch, cost_v, accuracy)
+                    print "== epoch [%d], cost [%f], accuracy [%f]" % (epoch, cost_v, accuracy_v)
+                    if DEBUG_LOG == True:
+                        print "t:", t
+                        print "tt:", tt
+
             # accumulative variables
-            print "accumulative variables:"
-            all_vars = ema.variables_to_restore(moving_avg_variables=accumulative_var_list)
-            all_vars_inverse = dict((v, k) for k, v in all_vars.iteritems())
-            accumulative_var_dict = dict((all_vars_inverse[v], v) for v in accumulative_var_list)
-            print accumulative_var_dict
+            if USE_BATCH_NORM == True:
+                print "accumulative variables:"
+                all_vars = ema.variables_to_restore(moving_avg_variables=accumulative_var_list)
+                all_vars_inverse = dict((v, k) for k, v in all_vars.iteritems())
+                accumulative_var_dict = dict((all_vars_inverse[v], v) for v in accumulative_var_list)
+                print accumulative_var_dict
             # save model
             saver = tf.train.Saver()
             save_path = saver.save(sess, MODEL_PATH)
@@ -207,33 +222,30 @@ if __name__ == "__main__":
 
     if GRAPH_MODE == "predict":
         with tf.Session() as sess:
-            X, Y, y, ema, train_op, cost = build_graph(GRAPH_MODE)
+            X, Y, y, ema, train_op, cost, accuracy, \
+                    t, tt \
+                    = build_graph(GRAPH_MODE)
 
             sess.run(tf.global_variables_initializer())
 
             # restore model
             restorer = tf.train.Saver()
             restorer.restore(sess, MODEL_PATH)
-            # restore accumulative variables to save
-            print "accumulative variables:"
-            all_vars = ema.variables_to_restore(moving_avg_variables=accumulative_var_list)
-            all_vars_inverse = dict((v, k) for k, v in all_vars.iteritems())
-            accumulative_var_dict = dict((all_vars_inverse[v], v) for v in accumulative_var_list)
-            print accumulative_var_dict
-            # save model
-            restorer = tf.train.Saver(accumulative_var_dict)
-            restorer.restore(sess, MODEL_PATH)
+            if USE_BATCH_NORM == True:
+                # restore accumulative variables to save
+                print "accumulative variables:"
+                all_vars = ema.variables_to_restore(moving_avg_variables=accumulative_var_list)
+                all_vars_inverse = dict((v, k) for k, v in all_vars.iteritems())
+                accumulative_var_dict = dict((all_vars_inverse[v], v) for v in accumulative_var_list)
+                print accumulative_var_dict
+                # save model
+                restorer = tf.train.Saver(accumulative_var_dict)
+                restorer.restore(sess, MODEL_PATH)
 
             summary_writer = tf.summary.FileWriter(LOGS_PATH, graph=tf.get_default_graph())
-            print "plotting..."
-            x_data, y_data = mock_util.x2makeup(
-                param_x, param_y, param_bias, 1000)
-            y_v = sess.run([y],
-                feed_dict={X:x_data, Y:y_data})
-            plt.scatter(x_data, y_data, c='b', label='truth')
-            plt.scatter(x_data, y_v, c='r', label='predict')
-            plt.legend(loc='upper left')
-            plt.show()
+            print "==\n Final Testing Accuracy: ", \
+                    sess.run(accuracy, feed_dict={X: mnist_data.test.images[:256],
+                                                  Y: mnist_data.test.labels[:256]})
 
     print("Run the command line:\n" \
           "--> tensorboard --logdir=" + LOGS_PATH + "" \
