@@ -162,27 +162,22 @@ def build_graph(mode="train"):
 
 if __name__ == "__main__":
     GRAPH_MODE = sys.argv[1]
+    mnist_data = mnist.input_data.read_data_sets(DATA_DIR, one_hot=True)
     clear_accumulative_ref()
     if GRAPH_MODE == "train":
         with tf.Session() as sess:
-            X, Y, y, ema, train_op, cost = build_graph(GRAPH_MODE)
+            X, Y, y, ema, train_op, cost, accuracy = build_graph(GRAPH_MODE)
             sess.run(tf.global_variables_initializer())
             summary_writer = tf.summary.FileWriter(LOGS_PATH, graph=tf.get_default_graph())
             for epoch in xrange(TRAINING_EPOCH_NUM):
                 # the bias term severely affects training with no norm
-                x_data, y_data = mock_util.x2makeup(
-                    x_start=param_x,
-                    x_stop=param_y,
-                    bias=param_bias,
-                    num=BATCH_SIZE)
+                x_data, y_data = mnist_data.train.next_batch(BATCH_SIZE)
                 sess.run([train_op],
                          feed_dict={X:x_data, Y:y_data})
                 if epoch % 100 == 0:
-                    cost_v, y_v, Y_v = sess.run([cost, y, Y],
+                    cost_v, accuracy_v = sess.run([cost, accuracy],
                          feed_dict={X:x_data, Y:y_data})
-                    print "== epoch [%d], cost [%f]" % (epoch, cost_v)
-                    if DEBUG_LOG == True:
-                        print "Y, y:\n", np.concatenate((Y_v, y_v), axis=1)
+                    print "== epoch [%d], cost [%f], accuracy [%f]" % (epoch, cost_v, accuracy)
             # accumulative variables
             print "accumulative variables:"
             all_vars = ema.variables_to_restore(moving_avg_variables=accumulative_var_list)
